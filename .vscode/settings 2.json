@@ -1,0 +1,12 @@
+{    
+    // Automatically activate the virtual environment in the integrated terminal
+    "python.terminal.activateEnvironment": true,
+
+    // Linting can be enabled if you like:
+    "python.linting.enabled": true,
+    "python.linting.pylintEnabled": false, // or true if you prefer pylint
+
+    // You can specify a formatter (like Black) if you wish:
+    "python.formatting.provider": "black",
+    "python.formatting.blackArgs": ["--line-length", "88"]
+}
