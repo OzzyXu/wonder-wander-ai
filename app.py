@@ -5,6 +5,7 @@ import logging
 import uuid
 import httpx
 import asyncio
+import re
 from quart import (
     Blueprint,
     Quart,
@@ -17,16 +18,13 @@ from quart import (
 )
 
 from openai import AsyncAzureOpenAI
-from azure.identity.aio import (
-    DefaultAzureCredential,
-    get_bearer_token_provider
-)
+from azure.identity.aio import DefaultAzureCredential, get_bearer_token_provider
 from backend.auth.auth_utils import get_authenticated_user_details
 from backend.security.ms_defender_utils import get_msdefender_user_json
 from backend.history.cosmosdbservice import CosmosConversationClient
 from backend.settings import (
     app_settings,
-    MINIMUM_SUPPORTED_AZURE_OPENAI_PREVIEW_API_VERSION
+    MINIMUM_SUPPORTED_AZURE_OPENAI_PREVIEW_API_VERSION,
 )
 from backend.utils import (
     format_as_ndjson,
@@ -45,7 +43,7 @@ def create_app():
     app = Quart(__name__)
     app.register_blueprint(bp)
     app.config["TEMPLATES_AUTO_RELOAD"] = True
-    
+
     @app.before_serving
     async def init():
         try:
@@ -55,16 +53,14 @@ def create_app():
             logging.exception("Failed to initialize CosmosDB client")
             app.cosmos_conversation_client = None
             raise e
-    
+
     return app
 
 
 @bp.route("/")
 async def index():
     return await render_template(
-        "index.html",
-        title=app_settings.ui.title,
-        favicon=app_settings.ui.favicon
+        "index.html", title=app_settings.ui.title, favicon=app_settings.ui.favicon
     )
 
 
@@ -90,8 +86,7 @@ USER_AGENT = "GitHubSampleWebApp/AsyncAzureOpenAI/1.0.0"
 frontend_settings = {
     "auth_enabled": app_settings.base_settings.auth_enabled,
     "feedback_enabled": (
-        app_settings.chat_history and
-        app_settings.chat_history.enable_feedback
+        app_settings.chat_history and app_settings.chat_history.enable_feedback
     ),
     "ui": {
         "title": app_settings.ui.title,
@@ -114,7 +109,7 @@ MS_DEFENDER_ENABLED = os.environ.get("MS_DEFENDER_ENABLED", "true").lower() == "
 # Initialize Azure OpenAI Client
 async def init_openai_client():
     azure_openai_client = None
-    
+
     try:
         # API version check
         if (
@@ -127,8 +122,8 @@ async def init_openai_client():
 
         # Endpoint
         if (
-            not app_settings.azure_openai.endpoint and
-            not app_settings.azure_openai.resource
+            not app_settings.azure_openai.endpoint
+            and not app_settings.azure_openai.resource
         ):
             raise ValueError(
                 "AZURE_OPENAI_ENDPOINT or AZURE_OPENAI_RESOURCE is required"
@@ -147,8 +142,7 @@ async def init_openai_client():
             logging.debug("No AZURE_OPENAI_KEY found, using Azure Entra ID auth")
             async with DefaultAzureCredential() as credential:
                 ad_token_provider = get_bearer_token_provider(
-                    credential,
-                    "https://cognitiveservices.azure.com/.default"
+                    credential, "https://cognitiveservices.azure.com/.default"
                 )
 
         # Deployment
@@ -185,7 +179,7 @@ async def init_cosmosdb_client():
             if not app_settings.chat_history.account_key:
                 async with DefaultAzureCredential() as cred:
                     credential = cred
-                    
+
             else:
                 credential = app_settings.chat_history.account_key
 
@@ -211,10 +205,7 @@ def prepare_model_args(request_body, request_headers):
     messages = []
     if not app_settings.datasource:
         messages = [
-            {
-                "role": "system",
-                "content": app_settings.azure_openai.system_message
-            }
+            {"role": "system", "content": app_settings.azure_openai.system_message}
         ]
 
     for message in request_messages:
@@ -225,23 +216,25 @@ def prepare_model_args(request_body, request_headers):
                     {
                         "role": message["role"],
                         "content": message["content"],
-                        "context": context_obj
+                        "context": context_obj,
                     }
                 )
             else:
                 messages.append(
-                    {
-                        "role": message["role"],
-                        "content": message["content"]
-                    }
+                    {"role": message["role"], "content": message["content"]}
                 )
 
     user_json = None
-    if (MS_DEFENDER_ENABLED):
+    if MS_DEFENDER_ENABLED:
         authenticated_user_details = get_authenticated_user_details(request_headers)
         conversation_id = request_body.get("conversation_id", None)
         application_name = app_settings.ui.title
-        user_json = get_msdefender_user_json(authenticated_user_details, request_headers, conversation_id, application_name)
+        user_json = get_msdefender_user_json(
+            authenticated_user_details,
+            request_headers,
+            conversation_id,
+            application_name,
+        )
 
     model_args = {
         "messages": messages,
@@ -251,15 +244,13 @@ def prepare_model_args(request_body, request_headers):
         "stop": app_settings.azure_openai.stop_sequence,
         "stream": app_settings.azure_openai.stream,
         "model": app_settings.azure_openai.model,
-        "user": user_json
+        "user": user_json,
     }
 
     if app_settings.datasource:
         model_args["extra_body"] = {
             "data_sources": [
-                app_settings.datasource.construct_payload_configuration(
-                    request=request
-                )
+                app_settings.datasource.construct_payload_configuration(request=request)
             ]
         }
 
@@ -316,14 +307,16 @@ async def promptflow_request(request):
             pf_formatted_obj = convert_to_pf_format(
                 request,
                 app_settings.promptflow.request_field_name,
-                app_settings.promptflow.response_field_name
+                app_settings.promptflow.response_field_name,
             )
             # NOTE: This only support question and chat_history parameters
             # If you need to add more parameters, you need to modify the request body
             response = await client.post(
                 app_settings.promptflow.endpoint,
                 json={
-                    app_settings.promptflow.request_field_name: pf_formatted_obj[-1]["inputs"][app_settings.promptflow.request_field_name],
+                    app_settings.promptflow.request_field_name: pf_formatted_obj[-1][
+                        "inputs"
+                    ][app_settings.promptflow.request_field_name],
                     "chat_history": pf_formatted_obj[:-1],
                 },
                 headers=headers,
@@ -339,17 +332,21 @@ async def send_chat_request(request_body, request_headers):
     filtered_messages = []
     messages = request_body.get("messages", [])
     for message in messages:
-        if message.get("role") != 'tool':
+        if message.get("role") != "tool":
             filtered_messages.append(message)
-            
-    request_body['messages'] = filtered_messages
+
+    request_body["messages"] = filtered_messages
     model_args = prepare_model_args(request_body, request_headers)
 
     try:
         azure_openai_client = await init_openai_client()
-        raw_response = await azure_openai_client.chat.completions.with_raw_response.create(**model_args)
+        raw_response = (
+            await azure_openai_client.chat.completions.with_raw_response.create(
+                **model_args
+            )
+        )
         response = raw_response.parse()
-        apim_request_id = raw_response.headers.get("apim-request-id") 
+        apim_request_id = raw_response.headers.get("apim-request-id")
     except Exception as e:
         logging.exception("Exception in send_chat_request")
         raise e
@@ -365,28 +362,37 @@ async def complete_chat_request(request_body, request_headers):
             response,
             history_metadata,
             app_settings.promptflow.response_field_name,
-            app_settings.promptflow.citations_field_name
+            app_settings.promptflow.citations_field_name,
         )
     else:
-        response, apim_request_id = await send_chat_request(request_body, request_headers)
+        response, apim_request_id = await send_chat_request(
+            request_body, request_headers
+        )
         history_metadata = request_body.get("history_metadata", {})
-        return format_non_streaming_response(response, history_metadata, apim_request_id)
+        return format_non_streaming_response(
+            response, history_metadata, apim_request_id
+        )
 
 
 async def stream_chat_request(request_body, request_headers):
     response, apim_request_id = await send_chat_request(request_body, request_headers)
     history_metadata = request_body.get("history_metadata", {})
-    
+
     async def generate():
         async for completionChunk in response:
-            yield format_stream_response(completionChunk, history_metadata, apim_request_id)
+            yield format_stream_response(
+                completionChunk, history_metadata, apim_request_id
+            )
 
     return generate()
 
 
 async def conversation_internal(request_body, request_headers):
     try:
-        if app_settings.azure_openai.stream and not app_settings.base_settings.use_promptflow:
+        if (
+            app_settings.azure_openai.stream
+            and not app_settings.base_settings.use_promptflow
+        ):
             result = await stream_chat_request(request_body, request_headers)
             response = await make_response(format_as_ndjson(result))
             response.timeout = None
@@ -406,11 +412,126 @@ async def conversation_internal(request_body, request_headers):
 
 @bp.route("/conversation", methods=["POST"])
 async def conversation():
+    logging.info("conversation_endpoint was called")
     if not request.is_json:
         return jsonify({"error": "request must be json"}), 415
     request_json = await request.get_json()
 
     return await conversation_internal(request_json, request.headers)
+
+
+# ----------------------------------------------------------------------
+# Cleaning function: removes extra spaces before punctuation and
+# ensures one space after punctuation.
+# ----------------------------------------------------------------------
+def clean_aggregated_content(text: str) -> str:
+    # Remove leading/trailing whitespace.
+    text = text.strip()
+    # Remove spaces before punctuation symbols (comma, period, exclamation, question mark).
+    text = re.sub(r"\s+([,!.?])", r"\1", text)
+    # Ensure exactly one space after punctuation.
+    text = re.sub(r"([,!.?])\s*", r"\1 ", text)
+    # Remove any trailing space added at the end.
+    return text.strip()
+
+
+# ----------------------------------------------------------------------
+# Aggregation helper function.
+#
+# This function aggregates all NDJSON chunks into a single JSON object.
+# It concatenates all the "content" fields from the "choices" messages,
+# cleans the aggregated string, and then uses the first valid JSON chunk
+# as a base to preserve all other fields.
+# ----------------------------------------------------------------------
+async def aggregate_conversation_data(response) -> dict:
+    aggregated_message = ""
+    base_data = None
+
+    # Check for a streaming response.
+    if response.mimetype == "application/json-lines" and hasattr(
+        response.response, "__aiter__"
+    ):
+        async for chunk in response.response:
+            if isinstance(chunk, bytes):
+                chunk = chunk.decode("utf-8")
+            for line in chunk.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if data.get("object") == "chat.completion.chunk":
+                    if base_data is None:
+                        base_data = data.copy()
+                    for choice in data.get("choices", []):
+                        for message in choice.get("messages", []):
+                            aggregated_message += message.get("content", "")
+    else:
+        # Non-streaming: Read the full response body.
+        data_str = await response.get_data(as_text=True)
+        lines = data_str.splitlines()
+        if len(lines) > 1:
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if data.get("object") == "chat.completion.chunk":
+                    if base_data is None:
+                        base_data = data.copy()
+                    for choice in data.get("choices", []):
+                        for message in choice.get("messages", []):
+                            aggregated_message += message.get("content", "")
+        else:
+            try:
+                data = json.loads(data_str)
+                if data.get("object") == "chat.completion.chunk" and "choices" in data:
+                    base_data = data.copy()
+                    for choice in data.get("choices", []):
+                        for message in choice.get("messages", []):
+                            aggregated_message += message.get("content", "")
+                else:
+                    return data
+            except json.JSONDecodeError:
+                return {"error": "Invalid JSON response"}
+
+    if base_data is not None:
+        # Clean the aggregated message to remove unwanted spaces before punctuation.
+        aggregated_message = clean_aggregated_content(aggregated_message)
+        for choice in base_data.get("choices", []):
+            for message in choice.get("messages", []):
+                message["content"] = aggregated_message
+        return base_data
+    else:
+        return {"aggregated_message": clean_aggregated_content(aggregated_message)}
+
+
+# ----------------------------------------------------------------------
+# New endpoint: Calls conversation_internal and returns the aggregated JSON.
+# ----------------------------------------------------------------------
+@bp.route("/aggregate_conversation", methods=["POST"])
+async def aggregate_conversation_endpoint():
+    logging.info("aggregate_conversation_endpoint was called")
+    if not request.is_json:
+        return jsonify({"error": "request must be json"}), 415
+
+    request_json = await request.get_json()
+
+    # Call conversation_internal to get a Response object.
+    response = await conversation_internal(request_json, request.headers)
+
+    # Aggregate the response content.
+    aggregated_data = await aggregate_conversation_data(response)
+
+    # Use custom separators to ensure a space after each comma and colon.
+    formatted_json = json.dumps(aggregated_data, separators=(", ", ": "))
+    formatted_json += "\n"
+    return formatted_json, 200, {"Content-Type": "application/json"}
 
 
 @bp.route("/frontend_settings", methods=["GET"])
@@ -442,8 +563,10 @@ async def add_conversation():
         history_metadata = {}
         if not conversation_id:
             title = await generate_title(request_json["messages"])
-            conversation_dict = await current_app.cosmos_conversation_client.create_conversation(
-                user_id=user_id, title=title
+            conversation_dict = (
+                await current_app.cosmos_conversation_client.create_conversation(
+                    user_id=user_id, title=title
+                )
             )
             conversation_id = conversation_dict["id"]
             history_metadata["title"] = title
@@ -453,11 +576,13 @@ async def add_conversation():
         ## then write it to the conversation history in cosmos
         messages = request_json["messages"]
         if len(messages) > 0 and messages[-1]["role"] == "user":
-            createdMessageValue = await current_app.cosmos_conversation_client.create_message(
-                uuid=str(uuid.uuid4()),
-                conversation_id=conversation_id,
-                user_id=user_id,
-                input_message=messages[-1],
+            createdMessageValue = (
+                await current_app.cosmos_conversation_client.create_message(
+                    uuid=str(uuid.uuid4()),
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    input_message=messages[-1],
+                )
             )
             if createdMessageValue == "Conversation not found":
                 raise Exception(
@@ -547,8 +672,10 @@ async def update_message():
             return jsonify({"error": "message_feedback is required"}), 400
 
         ## update the message in cosmos
-        updated_message = await current_app.cosmos_conversation_client.update_message_feedback(
-            user_id, message_id, message_feedback
+        updated_message = (
+            await current_app.cosmos_conversation_client.update_message_feedback(
+                user_id, message_id, message_feedback
+            )
         )
         if updated_message:
             return (
@@ -600,8 +727,10 @@ async def delete_conversation():
         )
 
         ## Now delete the conversation
-        deleted_conversation = await current_app.cosmos_conversation_client.delete_conversation(
-            user_id, conversation_id
+        deleted_conversation = (
+            await current_app.cosmos_conversation_client.delete_conversation(
+                user_id, conversation_id
+            )
         )
 
         return (
@@ -729,8 +858,8 @@ async def rename_conversation():
     if not title:
         return jsonify({"error": "title is required"}), 400
     conversation["title"] = title
-    updated_conversation = await current_app.cosmos_conversation_client.upsert_conversation(
-        conversation
+    updated_conversation = (
+        await current_app.cosmos_conversation_client.upsert_conversation(conversation)
     )
 
     return jsonify(updated_conversation), 200
@@ -758,13 +887,17 @@ async def delete_all_conversations():
         # delete each conversation
         for conversation in conversations:
             ## delete the conversation messages from cosmos first
-            deleted_messages = await current_app.cosmos_conversation_client.delete_messages(
-                conversation["id"], user_id
+            deleted_messages = (
+                await current_app.cosmos_conversation_client.delete_messages(
+                    conversation["id"], user_id
+                )
             )
 
             ## Now delete the conversation
-            deleted_conversation = await current_app.cosmos_conversation_client.delete_conversation(
-                user_id, conversation["id"]
+            deleted_conversation = (
+                await current_app.cosmos_conversation_client.delete_conversation(
+                    user_id, conversation["id"]
+                )
             )
         return (
             jsonify(
@@ -872,7 +1005,10 @@ async def generate_title(conversation_messages) -> str:
     try:
         azure_openai_client = await init_openai_client()
         response = await azure_openai_client.chat.completions.create(
-            model=app_settings.azure_openai.model, messages=messages, temperature=1, max_tokens=64
+            model=app_settings.azure_openai.model,
+            messages=messages,
+            temperature=1,
+            max_tokens=64,
         )
 
         title = response.choices[0].message.content
