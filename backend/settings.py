@@ -701,7 +701,7 @@ class _MongoDbSettings(BaseSettings, DatasourcePayloadConstructor):
 
 class _BlobStorageSettings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_prefix="CUSTOMCONNSTR_AZURE_STORAGE_",
+        env_prefix="AZURE_STORAGE_",
         env_file=DOTENV_PATH,
         extra="ignore",
         env_ignore_empty=True,
