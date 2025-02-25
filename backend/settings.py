@@ -707,9 +707,21 @@ class _BlobStorageSettings(BaseSettings):
         env_ignore_empty=True,
     )
 
-    connection_string: str
-    account_name: str
-    container_name: str
+    connection_string: str = Field(..., description="Azure Blob Storage connection string", env="AZURE_STORAGE_CONNECTION_STRING")
+    account_name: str = Field(..., description="Azure Storage account name", env="AZURE_STORAGE_ACCOUNT_NAME")
+    container_name: str = Field(..., description="Blob container name", env="AZURE_STORAGE_CONTAINER_NAME")
+
+    @classmethod
+    def create(cls):
+        try:
+            settings = cls()
+            return settings
+        except ValidationError as e:
+            print(f"Blob Storage settings validation failed: {e}")
+            raise
+        except Exception as e:
+            print(f"Error initializing Blob Storage settings: {e}")
+            raise
 
 
 class _BaseSettings(BaseSettings):
