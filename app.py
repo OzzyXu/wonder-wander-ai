@@ -1,42 +1,65 @@
+import asyncio
 import copy
 import json
-import os
 import logging
-import uuid
-import httpx
-import asyncio
+import os
 import re
+import uuid
+from datetime import datetime, timedelta, timezone
+
+import httpx
+from azure.cosmos.aio import CosmosClient  # Async client
+from azure.identity.aio import DefaultAzureCredential, get_bearer_token_provider
+from azure.storage.blob import BlobServiceClient, generate_blob_sas
+from openai import AsyncAzureOpenAI
 from quart import (
     Blueprint,
     Quart,
+    current_app,
     jsonify,
     make_response,
+    render_template,
     request,
     send_from_directory,
-    render_template,
-    current_app,
 )
 
-from openai import AsyncAzureOpenAI
-from azure.identity.aio import DefaultAzureCredential, get_bearer_token_provider
 from backend.auth.auth_utils import get_authenticated_user_details
-from backend.security.ms_defender_utils import get_msdefender_user_json
 from backend.history.cosmosdbservice import CosmosConversationClient
+from backend.security.ms_defender_utils import get_msdefender_user_json
 from backend.settings import (
-    app_settings,
     MINIMUM_SUPPORTED_AZURE_OPENAI_PREVIEW_API_VERSION,
+    app_settings,
 )
 from backend.utils import (
-    format_as_ndjson,
-    format_stream_response,
-    format_non_streaming_response,
     convert_to_pf_format,
+    format_as_ndjson,
+    format_non_streaming_response,
     format_pf_non_streaming_response,
+    format_stream_response,
 )
 
 bp = Blueprint("routes", __name__, static_folder="static", template_folder="static")
 
 cosmos_db_ready = asyncio.Event()
+
+### TODO: these may need to move to settings.py
+# Load from App Settings
+blob_connection_string = os.getenv("CUSTOMCONNSTR_AZURE_STORAGE_CONNECTION_STRING")
+blob_container_name = os.getenv("AZURE_STORAGE_CONTAINER_NAME", "photos")
+
+# Initialize Blob Service Client
+blob_service_client = BlobServiceClient.from_connection_string(blob_connection_string)
+blob_container_client = blob_service_client.get_container_client(blob_container_name)
+
+# Cosmos DB and Blob Storage configuration
+photo_cosmos_url = os.getenv("AZURE_COSMOSDB_ACCOUNT_URL")
+photo_cosmos_key = app_settings.chat_history.account_key
+
+# Validate Cosmos DB credentials
+if not photo_cosmos_url or not photo_cosmos_key:
+    raise ValueError("COSMOS_URL or COSMOS_KEY not set in environment variables")
+if not photo_cosmos_url.startswith("https://"):
+    raise ValueError("COSMOS_URL must start with 'https://'")
 
 
 def create_app():
@@ -49,6 +72,16 @@ def create_app():
         try:
             app.cosmos_conversation_client = await init_cosmosdb_client()
             cosmos_db_ready.set()
+
+            ### TODO: this is not good and needs to get updated later.
+            global photo_cosmos_client, photo_cosmos_database, photo_cosmos_container
+            photo_cosmos_client = CosmosClient(
+                photo_cosmos_url, credential=photo_cosmos_key
+            )
+            photo_cosmos_database = photo_cosmos_client.get_database_client("db_photo")
+            photo_cosmos_container = photo_cosmos_database.get_container_client(
+                "metadata"
+            )
         except Exception as e:
             logging.exception("Failed to initialize CosmosDB client")
             app.cosmos_conversation_client = None
@@ -1016,6 +1049,117 @@ async def generate_title(conversation_messages) -> str:
     except Exception as e:
         logging.exception("Exception while generating title", e)
         return messages[-2]["content"]
+
+
+# Function to get blob URLs as a dictionary
+def get_blob_urls(container_name="photos", sas_duration_hours=1):
+    """
+    Returns a dictionary of blob names mapped to their URLs.
+    Args:
+        container_name (str): Name of the container (default: 'photos').
+        sas_duration_hours (int): Duration in hours for SAS token validity (default: 1).
+    Returns:
+        dict: Dictionary with blob names as keys and URLs as values.
+    """
+    account_name = blob_service_client.account_name
+    account_key = blob_service_client.credential.account_key
+
+    blob_list = blob_container_client.list_blobs()
+    url_dict = {}
+
+    for blob in blob_list:
+        blob_name = blob.name
+        blob_client = blob_container_client.get_blob_client(blob_name)
+
+        # Generate SAS URL with timezone-aware datetime
+        sas_token = generate_blob_sas(
+            account_name=account_name,
+            container_name=container_name,
+            blob_name=blob_name,
+            account_key=account_key,
+            permission="r",  # Read-only
+            expiry=datetime.now(timezone.utc)
+            + timedelta(hours=sas_duration_hours),  # Updated
+        )
+        sas_url = f"{blob_client.url}?{sas_token}"
+        url_dict[blob_name] = sas_url
+
+    return url_dict
+
+
+# Updated route to list all photo URLs in "name": "url" format
+@bp.route("/photos", methods=["GET"])
+def list_photos():
+    try:
+        url_dict = get_blob_urls(blob_container_name)
+        return jsonify({"photos": url_dict})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/api/sas", methods=["GET"])
+async def get_sas():
+    try:
+        blob_name = request.args.get("blob_name")
+        blob_client = blob_service_client.get_blob_client(
+            blob_container_name, blob_name
+        )
+        sas_token = generate_blob_sas(
+            account_name=blob_client.account_name,
+            container_name=blob_container_name,
+            blob_name=blob_name,
+            account_key=blob_service_client.credential.account_key,
+            permission="w",
+            expiry=datetime.now(timezone.utc) + timedelta(minutes=15),
+        )
+        sas_url = f"{blob_client.url}?{sas_token}"
+        print(f"Generated SAS URL: {sas_url}")
+        return jsonify({"sas_url": sas_url})
+    except Exception as e:
+        print(f"Error in /api/sas: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/upload", methods=["POST"])
+async def track_photo():
+    try:
+        data = await request.get_json()  # Async JSON parsing
+        photo_entry = {
+            "id": data["blob_name"],
+            "user_id": data["user_id"],
+            "conversation_id": data.get("conversation_id", "test_conv"),
+            "url": data["url"],
+            "timestamp": data.get("timestamp", datetime.now(timezone.utc).isoformat()),
+        }
+        await photo_cosmos_container.upsert_item(photo_entry)  # Async upsert
+        return jsonify({"message": "Photo tracked"})
+    except Exception as e:
+        print(f"Error in /upload: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/photos/<user_id>", methods=["GET"])
+async def get_user_photos(user_id):
+    try:
+        query = "SELECT c.id, c.url, c.conversation_id, c.timestamp FROM c WHERE c.user_id = @user_id"
+        photos = []
+        async for item in photo_cosmos_container.query_items(
+            query=query, parameters=[{"name": "@user_id", "value": user_id}]
+        ):
+            photos.append(item)
+        return jsonify({"photos": photos})
+    except Exception as e:
+        print(f"Error in /photos: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/test-photo-cosmos", methods=["GET"])
+def test_photo_cosmos():
+    try:
+        photo_cosmos_container.read()  # Checks if container is accessible
+        return jsonify({"message": "Cosmos DB connection successful"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 app = create_app()
