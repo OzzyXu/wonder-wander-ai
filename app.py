@@ -42,17 +42,16 @@ bp = Blueprint("routes", __name__, static_folder="static", template_folder="stat
 
 cosmos_db_ready = asyncio.Event()
 
-### TODO: these may need to move to settings.py
 # Load from App Settings
-blob_connection_string = os.getenv("CUSTOMCONNSTR_AZURE_STORAGE_CONNECTION_STRING")
-blob_container_name = os.getenv("AZURE_STORAGE_CONTAINER_NAME", "photos")
+blob_connection_string = app_settings.blobstorage.connection_string
+blob_container_name = app_settings.blobstorage.container_name
 
 # Initialize Blob Service Client
 blob_service_client = BlobServiceClient.from_connection_string(blob_connection_string)
 blob_container_client = blob_service_client.get_container_client(blob_container_name)
 
 # Cosmos DB and Blob Storage configuration
-photo_cosmos_url = os.getenv("AZURE_COSMOSDB_ACCOUNT_URL")
+photo_cosmos_url = app_settings.chat_history.account_url
 photo_cosmos_key = app_settings.chat_history.account_key
 
 # Validate Cosmos DB credentials
