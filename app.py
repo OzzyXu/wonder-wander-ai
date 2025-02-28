@@ -40,6 +40,12 @@ from backend.utils import (
     format_stream_response,
 )
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.StreamHandler()]
+)
 logger = logging.getLogger(__name__)
 
 bp = Blueprint("routes", __name__, static_folder="static", template_folder="static")
