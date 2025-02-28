@@ -8,9 +8,11 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import httpx
+from azure.storage.blob import generate_blob_sas, BlobSasPermissions
+from azure.identity import DefaultAzureCredential
 from azure.cosmos.aio import CosmosClient  # Async client
-from azure.identity.aio import DefaultAzureCredential, get_bearer_token_provider
-from azure.storage.blob import BlobServiceClient, generate_blob_sas
+from azure.identity.aio import get_bearer_token_provider
+from azure.storage.blob.aio import BlobServiceClient
 from openai import AsyncAzureOpenAI
 from quart import (
     Blueprint,
@@ -38,16 +40,22 @@ from backend.utils import (
     format_stream_response,
 )
 
+logger = logging.getLogger(__name__)
+
 bp = Blueprint("routes", __name__, static_folder="static", template_folder="static")
 
 cosmos_db_ready = asyncio.Event()
 
-# Load from App Settings
-blob_connection_string = app_settings.blobstorage.connection_string
+# Load from App Settings (only account and container names needed)
+blob_account_name = app_settings.blobstorage.account_name
 blob_container_name = app_settings.blobstorage.container_name
 
 # Initialize Blob Service Client
-blob_service_client = BlobServiceClient.from_connection_string(blob_connection_string)
+blob_account_url = f"https://{blob_account_name}.blob.core.windows.net"
+blob_credential = DefaultAzureCredential()
+blob_service_client = BlobServiceClient(
+    account_url=blob_account_url, credential=blob_credential
+)
 blob_container_client = blob_service_client.get_container_client(blob_container_name)
 
 # Cosmos DB and Blob Storage configuration
@@ -55,8 +63,10 @@ photo_cosmos_url = app_settings.chat_history.account_url
 photo_cosmos_key = app_settings.chat_history.account_key
 
 # Validate Cosmos DB credentials
-if not photo_cosmos_url or not photo_cosmos_key:
-    raise ValueError("COSMOS_URL or COSMOS_KEY not set in environment variables")
+if not photo_cosmos_url:
+    raise ValueError("COSMOS_URL not set in environment variables")
+if not photo_cosmos_key:
+    raise ValueError("COSMOS_KEY not set in environment variables")
 if not photo_cosmos_url.startswith("https://"):
     raise ValueError("COSMOS_URL must start with 'https://'")
 
@@ -1050,8 +1060,8 @@ async def generate_title(conversation_messages) -> str:
         return messages[-2]["content"]
 
 
-# Function to get blob URLs as a dictionary
-def get_blob_urls(container_name="photos", sas_duration_hours=1):
+# Function to get blob URLs as a dictionary (async)
+async def get_blob_urls(container_name="photos", sas_duration_hours=1):
     """
     Returns a dictionary of blob names mapped to their URLs.
     Args:
@@ -1060,39 +1070,50 @@ def get_blob_urls(container_name="photos", sas_duration_hours=1):
     Returns:
         dict: Dictionary with blob names as keys and URLs as values.
     """
-    account_name = blob_service_client.account_name
-    account_key = blob_service_client.credential.account_key
-
-    blob_list = blob_container_client.list_blobs()
+    # Get user delegation key asynchronously
+    start_time = datetime.now(timezone.utc) - timedelta(minutes=15)
+    expiry_time = datetime.now(timezone.utc) + timedelta(hours=1)
+    user_delegation_key = await blob_service_client.get_user_delegation_key(
+        key_start_time=start_time,
+        key_expiry_time=expiry_time
+    )
+    
+    # Get container client synchronously
+    container_client = blob_service_client.get_container_client(container_name)
+    
+    # List blobs asynchronously
+    blob_list = []
+    async for blob in container_client.list_blobs():
+        blob_list.append(blob)
+    
     url_dict = {}
-
     for blob in blob_list:
         blob_name = blob.name
-        blob_client = blob_container_client.get_blob_client(blob_name)
+        blob_client = container_client.get_blob_client(blob_name)
 
-        # Generate SAS URL with timezone-aware datetime
+        # Generate SAS URL with user delegation key
         sas_token = generate_blob_sas(
-            account_name=account_name,
+            account_name=blob_account_name,
             container_name=container_name,
             blob_name=blob_name,
-            account_key=account_key,
-            permission="r",  # Read-only
-            expiry=datetime.now(timezone.utc)
-            + timedelta(hours=sas_duration_hours),  # Updated
+            user_delegation_key=user_delegation_key,
+            permission=BlobSasPermissions(read=True),  # Read-only
+            expiry=datetime.now(timezone.utc) + timedelta(hours=sas_duration_hours),
         )
         sas_url = f"{blob_client.url}?{sas_token}"
         url_dict[blob_name] = sas_url
 
     return url_dict
 
-
-# Updated route to list all photo URLs in "name": "url" format
+# Updated route to list all photo URLs in "name": "url" format (async)
 @bp.route("/photos", methods=["GET"])
-def list_photos():
+async def list_photos():
     try:
-        url_dict = get_blob_urls(blob_container_name)
+        url_dict = await get_blob_urls(blob_container_name)
+        logger.info("Listed %d photo URLs", len(url_dict))
         return jsonify({"photos": url_dict})
     except Exception as e:
+        logger.error("Error listing photos: %s", e)
         return jsonify({"error": str(e)}), 500
 
 
@@ -1100,22 +1121,39 @@ def list_photos():
 async def get_sas():
     try:
         blob_name = request.args.get("blob_name")
+        # Get user delegation key asynchronously
+        start_time = datetime.now(timezone.utc) - timedelta(
+            minutes=15
+        )  # Allow for clock skew
+        expiry_time = datetime.now(timezone.utc) + timedelta(hours=1)
+        user_delegation_key = await blob_service_client.get_user_delegation_key(
+            key_start_time=start_time, key_expiry_time=expiry_time
+        )
+
+        logger.debug(
+            "User Delegation Key generated: value=%s", user_delegation_key.value
+        )
+
         blob_client = blob_service_client.get_blob_client(
             blob_container_name, blob_name
         )
+
+        # Generate User Delegation SAS token
         sas_token = generate_blob_sas(
-            account_name=blob_client.account_name,
+            account_name=blob_account_name,
             container_name=blob_container_name,
             blob_name=blob_name,
-            account_key=blob_service_client.credential.account_key,
-            permission="w",
+            user_delegation_key=user_delegation_key,
+            permission=BlobSasPermissions(write=True),
             expiry=datetime.now(timezone.utc) + timedelta(minutes=15),
         )
+
         sas_url = f"{blob_client.url}?{sas_token}"
-        print(f"Generated SAS URL: {sas_url}")
+        logger.info("Generated SAS URL: %s", sas_url)
+        logger.info("SAS Token: %s", sas_token)
         return jsonify({"sas_url": sas_url})
     except Exception as e:
-        print(f"Error in /api/sas: {e}")
+        logger.error("Error in /api/sas: %s", e)
         return jsonify({"error": str(e)}), 500
 
 
