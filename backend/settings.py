@@ -708,6 +708,7 @@ class _BlobStorageSettings(BaseSettings):
     )
     account_name: str
     container_name: str
+    connection_string: str
 
 
 class _BaseSettings(BaseSettings):
