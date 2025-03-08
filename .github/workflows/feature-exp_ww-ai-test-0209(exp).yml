@@ -1,9 +1,8 @@
-
 # Docs for the Azure Web Apps Deploy action: https://github.com/Azure/webapps-deploy
 # More GitHub Actions for Azure: https://github.com/Azure/actions
 # More info on Python, GitHub Actions, and Azure App Service: https://aka.ms/python-webapps-actions
 
-name: Build and deploy Python app to Azure Web App - ww-ai-test-0209
+name: Build and deploy -- feature-exp
 
 on:
   push:
@@ -69,9 +68,9 @@ jobs:
       - name: Login to Azure
         uses: azure/login@v2
         with:
-          client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_2ECF516165324D3C91D061BDE8FCFA8E }}
-          tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_CD8BB41784A54559A7A545D2D46CA43B }}
-          subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_45EB70F92EF5414D8670C37BB42833AC }}
+          client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_A4F52EEF071B4EB8AF0B7762BDE7F8AA }}
+          tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_45B047B33FC94ED28522111DB7F1C58C }}
+          subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_035FB956538C4F27A2DD0BF257001AF7 }}
 
       - name: 'Deploy to Azure Web App'
         uses: azure/webapps-deploy@v3
