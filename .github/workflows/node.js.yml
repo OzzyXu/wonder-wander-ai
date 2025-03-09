@@ -5,10 +5,10 @@ name: Build Frontend
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "feature-exp", "feature-connection-string" ]
   pull_request:
-    branches: [ "main" ]
-    
+    branches: [ "main", "feature-exp", "feature-connection-string" ]
+  workflow_dispatch:
 
 jobs:
   build:
